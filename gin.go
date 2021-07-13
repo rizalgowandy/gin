@@ -25,7 +25,7 @@ var (
 	default405Body = []byte("405 method not allowed")
 )
 
-var defaultAppEngine bool
+var defaultPlatform string
 
 // HandlerFunc defines the handler used by gin middleware as return value.
 type HandlerFunc func(*Context)
@@ -51,6 +51,16 @@ type RouteInfo struct {
 
 // RoutesInfo defines a RouteInfo array.
 type RoutesInfo []RouteInfo
+
+// Trusted platforms
+const (
+	// When running on Google App Engine. Trust X-Appengine-Remote-Addr
+	// for determining the client's IP
+	PlatformGoogleAppEngine = "google-app-engine"
+	// When using Cloudflare's CDN. Trust CF-Connecting-IP for determining
+	// the client's IP
+	PlatformCloudflare = "cloudflare"
+)
 
 // Engine is the framework's instance, it contains the muxer, middleware and configuration settings.
 // Create an instance of Engine, by using New() or Default()
@@ -89,6 +99,23 @@ type Engine struct {
 	// `(*gin.Context).Request.RemoteAddr`.
 	ForwardedByClientIP bool
 
+	// DEPRECATED: USE `TrustedPlatform` WITH VALUE `gin.GoogleAppEngine` INSTEAD
+	// #726 #755 If enabled, it will trust some headers starting with
+	// 'X-AppEngine...' for better integration with that PaaS.
+	AppEngine bool
+
+	// If enabled, the url.RawPath will be used to find parameters.
+	UseRawPath bool
+
+	// If true, the path value will be unescaped.
+	// If UseRawPath is false (by default), the UnescapePathValues effectively is true,
+	// as url.Path gonna be used, which is already unescaped.
+	UnescapePathValues bool
+
+	// RemoveExtraSlash a parameter can be parsed from the URL even with extra slashes.
+	// See the PR #1817 and issue #1644
+	RemoveExtraSlash bool
+
 	// List of headers used to obtain the client IP when
 	// `(*gin.Engine).ForwardedByClientIP` is `true` and
 	// `(*gin.Context).Request.RemoteAddr` is matched by at least one of the
@@ -101,29 +128,13 @@ type Engine struct {
 	// `true`.
 	TrustedProxies []string
 
-	// #726 #755 If enabled, it will trust some headers starting with
-	// 'X-AppEngine...' for better integration with that PaaS.
-	AppEngine bool
-
-	// If enabled, it will trust the CF-Connecting-IP header to determine the
-	// IP of the client.
-	CloudflareProxy bool
-
-	// If enabled, the url.RawPath will be used to find parameters.
-	UseRawPath bool
-
-	// If true, the path value will be unescaped.
-	// If UseRawPath is false (by default), the UnescapePathValues effectively is true,
-	// as url.Path gonna be used, which is already unescaped.
-	UnescapePathValues bool
+	// If set to a constant of value gin.Platform*, trusts the headers set by
+	// that platform, for example to determine the client IP
+	TrustedPlatform string
 
 	// Value of 'maxMemory' param that is given to http.Request's ParseMultipartForm
 	// method call.
 	MaxMultipartMemory int64
-
-	// RemoveExtraSlash a parameter can be parsed from the URL even with extra slashes.
-	// See the PR #1817 and issue #1644
-	RemoveExtraSlash bool
 
 	delims           render.Delims
 	secureJSONPrefix string
@@ -164,7 +175,7 @@ func New() *Engine {
 		ForwardedByClientIP:    true,
 		RemoteIPHeaders:        []string{"X-Forwarded-For", "X-Real-IP"},
 		TrustedProxies:         []string{"0.0.0.0/0"},
-		AppEngine:              defaultAppEngine,
+		TrustedPlatform:        defaultPlatform,
 		UseRawPath:             false,
 		RemoveExtraSlash:       false,
 		UnescapePathValues:     true,
@@ -528,7 +539,7 @@ func (engine *Engine) handleHTTPRequest(c *Context) {
 			c.writermem.WriteHeaderNow()
 			return
 		}
-		if httpMethod != "CONNECT" && rPath != "/" {
+		if httpMethod != http.MethodConnect && rPath != "/" {
 			if value.tsr && engine.RedirectTrailingSlash {
 				redirectTrailingSlash(c)
 				return
