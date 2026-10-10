@@ -1,4 +1,4 @@
-// Copyright 2014 Manu Martinez-Almeida.  All rights reserved.
+// Copyright 2014 Manu Martinez-Almeida. All rights reserved.
 // Use of this source code is governed by a MIT style
 // license that can be found in the LICENSE file.
 
@@ -6,14 +6,15 @@ package gin
 
 import (
 	"fmt"
-	"io/ioutil"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 type header struct {
@@ -21,7 +22,8 @@ type header struct {
 	Value string
 }
 
-func performRequest(r http.Handler, method, path string, headers ...header) *httptest.ResponseRecorder {
+// PerformRequest for testing gin router.
+func PerformRequest(r http.Handler, method, path string, headers ...header) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(method, path, nil)
 	for _, h := range headers {
 		req.Header.Add(h.Key, h.Value)
@@ -42,15 +44,15 @@ func testRouteOK(method string, t *testing.T) {
 		passed = true
 	})
 
-	w := performRequest(r, method, "/test")
+	w := PerformRequest(r, method, "/test")
 	assert.True(t, passed)
 	assert.Equal(t, http.StatusOK, w.Code)
 
-	performRequest(r, method, "/test2")
+	PerformRequest(r, method, "/test2")
 	assert.True(t, passedAny)
 }
 
-// TestSingleRouteOK tests that POST route is correctly invoked.
+// testRouteNotOK tests that a request with the wrong method returns a not found response.
 func testRouteNotOK(method string, t *testing.T) {
 	passed := false
 	router := New()
@@ -58,13 +60,13 @@ func testRouteNotOK(method string, t *testing.T) {
 		passed = true
 	})
 
-	w := performRequest(router, method, "/test")
+	w := PerformRequest(router, method, "/test")
 
 	assert.False(t, passed)
 	assert.Equal(t, http.StatusNotFound, w.Code)
 }
 
-// TestSingleRouteOK tests that POST route is correctly invoked.
+// testRouteNotOK2 tests that a request with the wrong method returns a method not allowed response.
 func testRouteNotOK2(method string, t *testing.T) {
 	passed := false
 	router := New()
@@ -79,10 +81,63 @@ func testRouteNotOK2(method string, t *testing.T) {
 		passed = true
 	})
 
-	w := performRequest(router, method, "/test")
+	w := PerformRequest(router, method, "/test")
 
 	assert.False(t, passed)
 	assert.Equal(t, http.StatusMethodNotAllowed, w.Code)
+}
+
+// TestRouteQuery tests that a QUERY route is invoked and can read the request
+// body, which is the whole point of the method (RFC 10008).
+func TestRouteQuery(t *testing.T) {
+	type search struct {
+		Term string `json:"term"`
+	}
+
+	router := New()
+	router.QUERY("/search", func(c *Context) {
+		var body search
+		require.NoError(t, c.ShouldBindJSON(&body))
+		c.String(http.StatusOK, body.Term)
+	})
+
+	req := httptest.NewRequest(MethodQuery, "/search", strings.NewReader(`{"term":"gin"}`))
+	req.Header.Set("Content-Type", MIMEJSON)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, "gin", w.Body.String())
+}
+
+// TestRouteQueryRegisteredByAny documents that Any registers QUERY.
+func TestRouteQueryRegisteredByAny(t *testing.T) {
+	router := New()
+	router.Any("/test", func(c *Context) {
+		c.Status(http.StatusOK)
+	})
+
+	w := PerformRequest(router, MethodQuery, "/test")
+
+	assert.Equal(t, http.StatusOK, w.Code)
+}
+
+// TestQueryRoutesInterface tests that a router reached through IRoutes can
+// still register a QUERY route via the IQueryRoutes assertion.
+func TestQueryRoutesInterface(t *testing.T) {
+	router := New()
+
+	var routes IRoutes = router.Group("/v1")
+	queryRoutes, ok := routes.(IQueryRoutes)
+	require.True(t, ok)
+
+	queryRoutes.QUERY("/search", func(c *Context) {
+		c.Status(http.StatusOK)
+	})
+
+	w := PerformRequest(router, MethodQuery, "/v1/search")
+
+	assert.Equal(t, http.StatusOK, w.Code)
 }
 
 func TestRouterMethod(t *testing.T) {
@@ -99,7 +154,7 @@ func TestRouterMethod(t *testing.T) {
 		c.String(http.StatusOK, "sup3")
 	})
 
-	w := performRequest(router, http.MethodPut, "/hey")
+	w := PerformRequest(router, http.MethodPut, "/hey")
 
 	assert.Equal(t, http.StatusOK, w.Code)
 	assert.Equal(t, "called", w.Body.String())
@@ -115,6 +170,7 @@ func TestRouterGroupRouteOK(t *testing.T) {
 	testRouteOK(http.MethodDelete, t)
 	testRouteOK(http.MethodConnect, t)
 	testRouteOK(http.MethodTrace, t)
+	testRouteOK(MethodQuery, t)
 }
 
 func TestRouteNotOK(t *testing.T) {
@@ -127,6 +183,7 @@ func TestRouteNotOK(t *testing.T) {
 	testRouteNotOK(http.MethodDelete, t)
 	testRouteNotOK(http.MethodConnect, t)
 	testRouteNotOK(http.MethodTrace, t)
+	testRouteNotOK(MethodQuery, t)
 }
 
 func TestRouteNotOK2(t *testing.T) {
@@ -139,6 +196,7 @@ func TestRouteNotOK2(t *testing.T) {
 	testRouteNotOK2(http.MethodDelete, t)
 	testRouteNotOK2(http.MethodConnect, t)
 	testRouteNotOK2(http.MethodTrace, t)
+	testRouteNotOK2(MethodQuery, t)
 }
 
 func TestRouteRedirectTrailingSlash(t *testing.T) {
@@ -150,50 +208,98 @@ func TestRouteRedirectTrailingSlash(t *testing.T) {
 	router.POST("/path3", func(c *Context) {})
 	router.PUT("/path4/", func(c *Context) {})
 
-	w := performRequest(router, http.MethodGet, "/path/")
+	w := PerformRequest(router, http.MethodGet, "/path/")
 	assert.Equal(t, "/path", w.Header().Get("Location"))
 	assert.Equal(t, http.StatusMovedPermanently, w.Code)
 
-	w = performRequest(router, http.MethodGet, "/path2")
+	w = PerformRequest(router, http.MethodGet, "/path2")
 	assert.Equal(t, "/path2/", w.Header().Get("Location"))
 	assert.Equal(t, http.StatusMovedPermanently, w.Code)
 
-	w = performRequest(router, http.MethodPost, "/path3/")
+	w = PerformRequest(router, http.MethodPost, "/path3/")
 	assert.Equal(t, "/path3", w.Header().Get("Location"))
 	assert.Equal(t, http.StatusTemporaryRedirect, w.Code)
 
-	w = performRequest(router, http.MethodPut, "/path4")
+	w = PerformRequest(router, http.MethodPut, "/path4")
 	assert.Equal(t, "/path4/", w.Header().Get("Location"))
 	assert.Equal(t, http.StatusTemporaryRedirect, w.Code)
 
-	w = performRequest(router, http.MethodGet, "/path")
+	w = PerformRequest(router, http.MethodGet, "/path")
 	assert.Equal(t, http.StatusOK, w.Code)
 
-	w = performRequest(router, http.MethodGet, "/path2/")
+	w = PerformRequest(router, http.MethodGet, "/path2/")
 	assert.Equal(t, http.StatusOK, w.Code)
 
-	w = performRequest(router, http.MethodPost, "/path3")
+	w = PerformRequest(router, http.MethodPost, "/path3")
 	assert.Equal(t, http.StatusOK, w.Code)
 
-	w = performRequest(router, http.MethodPut, "/path4/")
+	w = PerformRequest(router, http.MethodPut, "/path4/")
 	assert.Equal(t, http.StatusOK, w.Code)
 
-	w = performRequest(router, http.MethodGet, "/path2", header{Key: "X-Forwarded-Prefix", Value: "/api"})
+	w = PerformRequest(router, http.MethodGet, "/path2", header{Key: "X-Forwarded-Prefix", Value: "/api"})
 	assert.Equal(t, "/api/path2/", w.Header().Get("Location"))
-	assert.Equal(t, 301, w.Code)
+	assert.Equal(t, http.StatusMovedPermanently, w.Code)
 
-	w = performRequest(router, http.MethodGet, "/path2/", header{Key: "X-Forwarded-Prefix", Value: "/api/"})
-	assert.Equal(t, 200, w.Code)
+	w = PerformRequest(router, http.MethodGet, "/path2/", header{Key: "X-Forwarded-Prefix", Value: "/api/"})
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	w = PerformRequest(router, http.MethodGet, "/path/", header{Key: "X-Forwarded-Prefix", Value: "../../api#?"})
+	assert.Equal(t, "/api/path", w.Header().Get("Location"))
+	assert.Equal(t, http.StatusMovedPermanently, w.Code)
+
+	w = PerformRequest(router, http.MethodGet, "/path/", header{Key: "X-Forwarded-Prefix", Value: "../../api"})
+	assert.Equal(t, "/api/path", w.Header().Get("Location"))
+	assert.Equal(t, http.StatusMovedPermanently, w.Code)
+
+	w = PerformRequest(router, http.MethodGet, "/path2", header{Key: "X-Forwarded-Prefix", Value: "../../api"})
+	assert.Equal(t, "/api/path2/", w.Header().Get("Location"))
+	assert.Equal(t, http.StatusMovedPermanently, w.Code)
+
+	w = PerformRequest(router, http.MethodGet, "/path2", header{Key: "X-Forwarded-Prefix", Value: "/../../api"})
+	assert.Equal(t, "/api/path2/", w.Header().Get("Location"))
+	assert.Equal(t, http.StatusMovedPermanently, w.Code)
+
+	w = PerformRequest(router, http.MethodGet, "/path/", header{Key: "X-Forwarded-Prefix", Value: "api/../../"})
+	assert.Equal(t, "//path", w.Header().Get("Location"))
+	assert.Equal(t, http.StatusMovedPermanently, w.Code)
+
+	w = PerformRequest(router, http.MethodGet, "/path/", header{Key: "X-Forwarded-Prefix", Value: "api/../../../"})
+	assert.Equal(t, "/path", w.Header().Get("Location"))
+	assert.Equal(t, http.StatusMovedPermanently, w.Code)
+
+	w = PerformRequest(router, http.MethodGet, "/path2", header{Key: "X-Forwarded-Prefix", Value: "../../gin-gonic.com"})
+	assert.Equal(t, "/gin-goniccom/path2/", w.Header().Get("Location"))
+	assert.Equal(t, http.StatusMovedPermanently, w.Code)
+
+	w = PerformRequest(router, http.MethodGet, "/path2", header{Key: "X-Forwarded-Prefix", Value: "/../../gin-gonic.com"})
+	assert.Equal(t, "/gin-goniccom/path2/", w.Header().Get("Location"))
+	assert.Equal(t, http.StatusMovedPermanently, w.Code)
+
+	w = PerformRequest(router, http.MethodGet, "/path/", header{Key: "X-Forwarded-Prefix", Value: "https://gin-gonic.com/#"})
+	assert.Equal(t, "https/gin-goniccom/https/gin-goniccom/path", w.Header().Get("Location"))
+	assert.Equal(t, http.StatusMovedPermanently, w.Code)
+
+	w = PerformRequest(router, http.MethodGet, "/path/", header{Key: "X-Forwarded-Prefix", Value: "#api"})
+	assert.Equal(t, "api/api/path", w.Header().Get("Location"))
+	assert.Equal(t, http.StatusMovedPermanently, w.Code)
+
+	w = PerformRequest(router, http.MethodGet, "/path/", header{Key: "X-Forwarded-Prefix", Value: "/nor-mal/#?a=1"})
+	assert.Equal(t, "/nor-mal/a1/path", w.Header().Get("Location"))
+	assert.Equal(t, http.StatusMovedPermanently, w.Code)
+
+	w = PerformRequest(router, http.MethodGet, "/path/", header{Key: "X-Forwarded-Prefix", Value: "/nor-mal/%2e%2e/"})
+	assert.Equal(t, "/nor-mal/2e2e/path", w.Header().Get("Location"))
+	assert.Equal(t, http.StatusMovedPermanently, w.Code)
 
 	router.RedirectTrailingSlash = false
 
-	w = performRequest(router, http.MethodGet, "/path/")
+	w = PerformRequest(router, http.MethodGet, "/path/")
 	assert.Equal(t, http.StatusNotFound, w.Code)
-	w = performRequest(router, http.MethodGet, "/path2")
+	w = PerformRequest(router, http.MethodGet, "/path2")
 	assert.Equal(t, http.StatusNotFound, w.Code)
-	w = performRequest(router, http.MethodPost, "/path3/")
+	w = PerformRequest(router, http.MethodPost, "/path3/")
 	assert.Equal(t, http.StatusNotFound, w.Code)
-	w = performRequest(router, http.MethodPut, "/path4")
+	w = PerformRequest(router, http.MethodPut, "/path4")
 	assert.Equal(t, http.StatusNotFound, w.Code)
 }
 
@@ -207,24 +313,24 @@ func TestRouteRedirectFixedPath(t *testing.T) {
 	router.POST("/PATH3", func(c *Context) {})
 	router.POST("/Path4/", func(c *Context) {})
 
-	w := performRequest(router, http.MethodGet, "/PATH")
+	w := PerformRequest(router, http.MethodGet, "/PATH")
 	assert.Equal(t, "/path", w.Header().Get("Location"))
 	assert.Equal(t, http.StatusMovedPermanently, w.Code)
 
-	w = performRequest(router, http.MethodGet, "/path2")
+	w = PerformRequest(router, http.MethodGet, "/path2")
 	assert.Equal(t, "/Path2", w.Header().Get("Location"))
 	assert.Equal(t, http.StatusMovedPermanently, w.Code)
 
-	w = performRequest(router, http.MethodPost, "/path3")
+	w = PerformRequest(router, http.MethodPost, "/path3")
 	assert.Equal(t, "/PATH3", w.Header().Get("Location"))
 	assert.Equal(t, http.StatusTemporaryRedirect, w.Code)
 
-	w = performRequest(router, http.MethodPost, "/path4")
+	w = PerformRequest(router, http.MethodPost, "/path4")
 	assert.Equal(t, "/Path4/", w.Header().Get("Location"))
 	assert.Equal(t, http.StatusTemporaryRedirect, w.Code)
 }
 
-// TestContextParamsGet tests that a parameter can be parsed from the URL.
+// TestRouteParamsByName tests that route parameters can be parsed by name.
 func TestRouteParamsByName(t *testing.T) {
 	name := ""
 	lastName := ""
@@ -248,7 +354,7 @@ func TestRouteParamsByName(t *testing.T) {
 		assert.False(t, ok)
 	})
 
-	w := performRequest(router, http.MethodGet, "/test/john/smith/is/super/great")
+	w := PerformRequest(router, http.MethodGet, "/test/john/smith/is/super/great")
 
 	assert.Equal(t, http.StatusOK, w.Code)
 	assert.Equal(t, "john", name)
@@ -256,7 +362,7 @@ func TestRouteParamsByName(t *testing.T) {
 	assert.Equal(t, "/is/super/great", wild)
 }
 
-// TestContextParamsGet tests that a parameter can be parsed from the URL even with extra slashes.
+// TestRouteParamsByNameWithExtraSlash tests that route parameters can be parsed by name even with extra slashes.
 func TestRouteParamsByNameWithExtraSlash(t *testing.T) {
 	name := ""
 	lastName := ""
@@ -281,7 +387,7 @@ func TestRouteParamsByNameWithExtraSlash(t *testing.T) {
 		assert.False(t, ok)
 	})
 
-	w := performRequest(router, http.MethodGet, "//test//john//smith//is//super//great")
+	w := PerformRequest(router, http.MethodGet, "//test//john//smith//is//super//great")
 
 	assert.Equal(t, http.StatusOK, w.Code)
 	assert.Equal(t, "john", name)
@@ -289,17 +395,56 @@ func TestRouteParamsByNameWithExtraSlash(t *testing.T) {
 	assert.Equal(t, "/is/super/great", wild)
 }
 
-// TestHandleStaticFile - ensure the static file handles properly
+// TestRouteParamsNotEmpty tests that context parameters will be set
+// even if a route with params/wildcards is registered after the context
+// initialisation (which happened in a previous requests).
+func TestRouteParamsNotEmpty(t *testing.T) {
+	name := ""
+	lastName := ""
+	wild := ""
+	router := New()
+
+	w := PerformRequest(router, http.MethodGet, "/test/john/smith/is/super/great")
+
+	assert.Equal(t, http.StatusNotFound, w.Code)
+
+	router.GET("/test/:name/:last_name/*wild", func(c *Context) {
+		name = c.Params.ByName("name")
+		lastName = c.Params.ByName("last_name")
+		var ok bool
+		wild, ok = c.Params.Get("wild")
+
+		assert.True(t, ok)
+		assert.Equal(t, name, c.Param("name"))
+		assert.Equal(t, lastName, c.Param("last_name"))
+
+		assert.Empty(t, c.Param("wtf"))
+		assert.Empty(t, c.Params.ByName("wtf"))
+
+		wtf, ok := c.Params.Get("wtf")
+		assert.Empty(t, wtf)
+		assert.False(t, ok)
+	})
+
+	w = PerformRequest(router, http.MethodGet, "/test/john/smith/is/super/great")
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, "john", name)
+	assert.Equal(t, "smith", lastName)
+	assert.Equal(t, "/is/super/great", wild)
+}
+
+// TestRouteStaticFile tests that a static file is served correctly.
 func TestRouteStaticFile(t *testing.T) {
 	// SETUP file
 	testRoot, _ := os.Getwd()
-	f, err := ioutil.TempFile(testRoot, "")
+	f, err := os.CreateTemp(testRoot, "")
 	if err != nil {
 		t.Error(err)
 	}
 	defer os.Remove(f.Name())
 	_, err = f.WriteString("Gin Web Framework")
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	f.Close()
 
 	dir, filename := filepath.Split(f.Name())
@@ -309,39 +454,73 @@ func TestRouteStaticFile(t *testing.T) {
 	router.Static("/using_static", dir)
 	router.StaticFile("/result", f.Name())
 
-	w := performRequest(router, http.MethodGet, "/using_static/"+filename)
-	w2 := performRequest(router, http.MethodGet, "/result")
+	w := PerformRequest(router, http.MethodGet, "/using_static/"+filename)
+	w2 := PerformRequest(router, http.MethodGet, "/result")
 
 	assert.Equal(t, w, w2)
 	assert.Equal(t, http.StatusOK, w.Code)
 	assert.Equal(t, "Gin Web Framework", w.Body.String())
 	assert.Equal(t, "text/plain; charset=utf-8", w.Header().Get("Content-Type"))
 
-	w3 := performRequest(router, http.MethodHead, "/using_static/"+filename)
-	w4 := performRequest(router, http.MethodHead, "/result")
+	w3 := PerformRequest(router, http.MethodHead, "/using_static/"+filename)
+	w4 := PerformRequest(router, http.MethodHead, "/result")
 
 	assert.Equal(t, w3, w4)
 	assert.Equal(t, http.StatusOK, w3.Code)
 }
 
-// TestHandleStaticDir - ensure the root/sub dir handles properly
+// TestRouteStaticFileFS tests that a static file from an http.FileSystem is served correctly.
+func TestRouteStaticFileFS(t *testing.T) {
+	// SETUP file
+	testRoot, _ := os.Getwd()
+	f, err := os.CreateTemp(testRoot, "")
+	if err != nil {
+		t.Error(err)
+	}
+	defer os.Remove(f.Name())
+	_, err = f.WriteString("Gin Web Framework")
+	require.NoError(t, err)
+	f.Close()
+
+	dir, filename := filepath.Split(f.Name())
+	// SETUP gin
+	router := New()
+	router.Static("/using_static", dir)
+	router.StaticFileFS("/result_fs", filename, Dir(dir, false))
+
+	w := PerformRequest(router, http.MethodGet, "/using_static/"+filename)
+	w2 := PerformRequest(router, http.MethodGet, "/result_fs")
+
+	assert.Equal(t, w, w2)
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, "Gin Web Framework", w.Body.String())
+	assert.Equal(t, "text/plain; charset=utf-8", w.Header().Get("Content-Type"))
+
+	w3 := PerformRequest(router, http.MethodHead, "/using_static/"+filename)
+	w4 := PerformRequest(router, http.MethodHead, "/result_fs")
+
+	assert.Equal(t, w3, w4)
+	assert.Equal(t, http.StatusOK, w3.Code)
+}
+
+// TestRouteStaticListingDir tests that static directory listing is enabled when configured.
 func TestRouteStaticListingDir(t *testing.T) {
 	router := New()
 	router.StaticFS("/", Dir("./", true))
 
-	w := performRequest(router, http.MethodGet, "/")
+	w := PerformRequest(router, http.MethodGet, "/")
 
 	assert.Equal(t, http.StatusOK, w.Code)
 	assert.Contains(t, w.Body.String(), "gin.go")
 	assert.Equal(t, "text/html; charset=utf-8", w.Header().Get("Content-Type"))
 }
 
-// TestHandleHeadToDir - ensure the root/sub dir handles properly
+// TestRouteStaticNoListing tests that static directory listing is disabled by default.
 func TestRouteStaticNoListing(t *testing.T) {
 	router := New()
 	router.Static("/", "./")
 
-	w := performRequest(router, http.MethodGet, "/")
+	w := PerformRequest(router, http.MethodGet, "/")
 
 	assert.Equal(t, http.StatusNotFound, w.Code)
 	assert.NotContains(t, w.Body.String(), "gin.go")
@@ -356,14 +535,14 @@ func TestRouterMiddlewareAndStatic(t *testing.T) {
 	})
 	static.Static("/", "./")
 
-	w := performRequest(router, http.MethodGet, "/gin.go")
+	w := PerformRequest(router, http.MethodGet, "/gin.go")
 
 	assert.Equal(t, http.StatusOK, w.Code)
 	assert.Contains(t, w.Body.String(), "package gin")
 	// Content-Type='text/plain; charset=utf-8' when go version <= 1.16,
 	// else, Content-Type='text/x-go; charset=utf-8'
-	assert.NotEqual(t, "", w.Header().Get("Content-Type"))
-	assert.NotEqual(t, w.Header().Get("Last-Modified"), "Mon, 02 Jan 2006 15:04:05 MST")
+	assert.NotEmpty(t, w.Header().Get("Content-Type"))
+	assert.NotEqual(t, "Mon, 02 Jan 2006 15:04:05 MST", w.Header().Get("Last-Modified"))
 	assert.Equal(t, "Mon, 02 Jan 2006 15:04:05 MST", w.Header().Get("Expires"))
 	assert.Equal(t, "Gin Framework", w.Header().Get("x-GIN"))
 }
@@ -372,13 +551,13 @@ func TestRouteNotAllowedEnabled(t *testing.T) {
 	router := New()
 	router.HandleMethodNotAllowed = true
 	router.POST("/path", func(c *Context) {})
-	w := performRequest(router, http.MethodGet, "/path")
+	w := PerformRequest(router, http.MethodGet, "/path")
 	assert.Equal(t, http.StatusMethodNotAllowed, w.Code)
 
 	router.NoMethod(func(c *Context) {
 		c.String(http.StatusTeapot, "responseText")
 	})
-	w = performRequest(router, http.MethodGet, "/path")
+	w = PerformRequest(router, http.MethodGet, "/path")
 	assert.Equal(t, "responseText", w.Body.String())
 	assert.Equal(t, http.StatusTeapot, w.Code)
 }
@@ -389,21 +568,33 @@ func TestRouteNotAllowedEnabled2(t *testing.T) {
 	// add one methodTree to trees
 	router.addRoute(http.MethodPost, "/", HandlersChain{func(_ *Context) {}})
 	router.GET("/path2", func(c *Context) {})
-	w := performRequest(router, http.MethodPost, "/path2")
+	w := PerformRequest(router, http.MethodPost, "/path2")
 	assert.Equal(t, http.StatusMethodNotAllowed, w.Code)
+}
+
+func TestRouteNotAllowedEnabled3(t *testing.T) {
+	router := New()
+	router.HandleMethodNotAllowed = true
+	router.GET("/path", func(c *Context) {})
+	router.POST("/path", func(c *Context) {})
+	w := PerformRequest(router, http.MethodPut, "/path")
+	assert.Equal(t, http.StatusMethodNotAllowed, w.Code)
+	allowed := w.Header().Get("Allow")
+	assert.Contains(t, allowed, http.MethodGet)
+	assert.Contains(t, allowed, http.MethodPost)
 }
 
 func TestRouteNotAllowedDisabled(t *testing.T) {
 	router := New()
 	router.HandleMethodNotAllowed = false
 	router.POST("/path", func(c *Context) {})
-	w := performRequest(router, http.MethodGet, "/path")
+	w := PerformRequest(router, http.MethodGet, "/path")
 	assert.Equal(t, http.StatusNotFound, w.Code)
 
 	router.NoMethod(func(c *Context) {
 		c.String(http.StatusTeapot, "responseText")
 	})
-	w = performRequest(router, http.MethodGet, "/path")
+	w = PerformRequest(router, http.MethodGet, "/path")
 	assert.Equal(t, "404 page not found", w.Body.String())
 	assert.Equal(t, http.StatusNotFound, w.Code)
 }
@@ -423,10 +614,10 @@ func TestRouterNotFoundWithRemoveExtraSlash(t *testing.T) {
 		{"/nope", http.StatusNotFound, ""}, // NotFound
 	}
 	for _, tr := range testRoutes {
-		w := performRequest(router, "GET", tr.route)
+		w := PerformRequest(router, http.MethodGet, tr.route)
 		assert.Equal(t, tr.code, w.Code)
 		if w.Code != http.StatusNotFound {
-			assert.Equal(t, tr.location, fmt.Sprint(w.Header().Get("Location")))
+			assert.Equal(t, tr.location, w.Header().Get("Location"))
 		}
 	}
 }
@@ -453,10 +644,10 @@ func TestRouterNotFound(t *testing.T) {
 		{"/nope", http.StatusNotFound, ""},                 // NotFound
 	}
 	for _, tr := range testRoutes {
-		w := performRequest(router, http.MethodGet, tr.route)
+		w := PerformRequest(router, http.MethodGet, tr.route)
 		assert.Equal(t, tr.code, w.Code)
 		if w.Code != http.StatusNotFound {
-			assert.Equal(t, tr.location, fmt.Sprint(w.Header().Get("Location")))
+			assert.Equal(t, tr.location, w.Header().Get("Location"))
 		}
 	}
 
@@ -466,34 +657,49 @@ func TestRouterNotFound(t *testing.T) {
 		c.AbortWithStatus(http.StatusNotFound)
 		notFound = true
 	})
-	w := performRequest(router, http.MethodGet, "/nope")
+	w := PerformRequest(router, http.MethodGet, "/nope")
 	assert.Equal(t, http.StatusNotFound, w.Code)
 	assert.True(t, notFound)
 
 	// Test other method than GET (want 307 instead of 301)
 	router.PATCH("/path", func(c *Context) {})
-	w = performRequest(router, http.MethodPatch, "/path/")
+	w = PerformRequest(router, http.MethodPatch, "/path/")
 	assert.Equal(t, http.StatusTemporaryRedirect, w.Code)
 	assert.Equal(t, "map[Location:[/path]]", fmt.Sprint(w.Header()))
 
 	// Test special case where no node for the prefix "/" exists
 	router = New()
 	router.GET("/a", func(c *Context) {})
-	w = performRequest(router, http.MethodGet, "/")
+	w = PerformRequest(router, http.MethodGet, "/")
 	assert.Equal(t, http.StatusNotFound, w.Code)
+
+	// Reproduction test for the bug of issue #2843
+	router = New()
+	router.NoRoute(func(c *Context) {
+		if c.Request.RequestURI == "/login" {
+			c.String(http.StatusOK, "login")
+		}
+	})
+	router.GET("/logout", func(c *Context) {
+		c.String(http.StatusOK, "logout")
+	})
+	w = PerformRequest(router, http.MethodGet, "/login")
+	assert.Equal(t, "login", w.Body.String())
+	w = PerformRequest(router, http.MethodGet, "/logout")
+	assert.Equal(t, "logout", w.Body.String())
 }
 
 func TestRouterStaticFSNotFound(t *testing.T) {
 	router := New()
 	router.StaticFS("/", http.FileSystem(http.Dir("/thisreallydoesntexist/")))
 	router.NoRoute(func(c *Context) {
-		c.String(404, "non existent")
+		c.String(http.StatusNotFound, "non existent")
 	})
 
-	w := performRequest(router, http.MethodGet, "/nonexistent")
+	w := PerformRequest(router, http.MethodGet, "/nonexistent")
 	assert.Equal(t, "non existent", w.Body.String())
 
-	w = performRequest(router, http.MethodHead, "/nonexistent")
+	w = PerformRequest(router, http.MethodHead, "/nonexistent")
 	assert.Equal(t, "non existent", w.Body.String())
 }
 
@@ -503,11 +709,11 @@ func TestRouterStaticFSFileNotFound(t *testing.T) {
 	router.StaticFS("/", http.FileSystem(http.Dir(".")))
 
 	assert.NotPanics(t, func() {
-		performRequest(router, http.MethodGet, "/nonexistent")
+		PerformRequest(router, http.MethodGet, "/nonexistent")
 	})
 }
 
-// Reproduction test for the bug of issue #1805
+// TestMiddlewareCalledOnceByRouterStaticFSNotFound reproduces the bug reported in issue #1805.
 func TestMiddlewareCalledOnceByRouterStaticFSNotFound(t *testing.T) {
 	router := New()
 
@@ -520,11 +726,11 @@ func TestMiddlewareCalledOnceByRouterStaticFSNotFound(t *testing.T) {
 	router.StaticFS("/", http.FileSystem(http.Dir("/thisreallydoesntexist/")))
 
 	// First access
-	performRequest(router, http.MethodGet, "/nonexistent")
+	PerformRequest(router, http.MethodGet, "/nonexistent")
 	assert.Equal(t, 1, middlewareCalledNum)
 
 	// Second access
-	performRequest(router, http.MethodHead, "/nonexistent")
+	PerformRequest(router, http.MethodHead, "/nonexistent")
 	assert.Equal(t, 2, middlewareCalledNum)
 }
 
@@ -543,7 +749,7 @@ func TestRouteRawPath(t *testing.T) {
 		assert.Equal(t, "222", num)
 	})
 
-	w := performRequest(route, http.MethodPost, "/project/Some%2FOther%2FProject/build/222")
+	w := PerformRequest(route, http.MethodPost, "/project/Some%2FOther%2FProject/build/222")
 	assert.Equal(t, http.StatusOK, w.Code)
 }
 
@@ -563,19 +769,19 @@ func TestRouteRawPathNoUnescape(t *testing.T) {
 		assert.Equal(t, "333", num)
 	})
 
-	w := performRequest(route, http.MethodPost, "/project/Some%2FOther%2FProject/build/333")
+	w := PerformRequest(route, http.MethodPost, "/project/Some%2FOther%2FProject/build/333")
 	assert.Equal(t, http.StatusOK, w.Code)
 }
 
 func TestRouteServeErrorWithWriteHeader(t *testing.T) {
 	route := New()
 	route.Use(func(c *Context) {
-		c.Status(421)
+		c.Status(http.StatusMisdirectedRequest)
 		c.Next()
 	})
 
-	w := performRequest(route, http.MethodGet, "/NotFound")
-	assert.Equal(t, 421, w.Code)
+	w := PerformRequest(route, http.MethodGet, "/NotFound")
+	assert.Equal(t, http.StatusMisdirectedRequest, w.Code)
 	assert.Equal(t, 0, w.Body.Len())
 }
 
@@ -608,16 +814,156 @@ func TestRouteContextHoldsFullPath(t *testing.T) {
 	}
 
 	for _, route := range routes {
-		w := performRequest(router, http.MethodGet, route)
+		w := PerformRequest(router, http.MethodGet, route)
 		assert.Equal(t, http.StatusOK, w.Code)
 	}
 
 	// Test not found
 	router.Use(func(c *Context) {
 		// For not found routes full path is empty
-		assert.Equal(t, "", c.FullPath())
+		assert.Empty(t, c.FullPath())
 	})
 
-	w := performRequest(router, http.MethodGet, "/not-found")
+	w := PerformRequest(router, http.MethodGet, "/not-found")
 	assert.Equal(t, http.StatusNotFound, w.Code)
+}
+
+func TestEngineHandleMethodNotAllowedCornerCase(t *testing.T) {
+	r := New()
+	r.HandleMethodNotAllowed = true
+
+	base := r.Group("base")
+	base.GET("/metrics", handlerTest1)
+
+	v1 := base.Group("v1")
+
+	v1.GET("/:id/devices", handlerTest1)
+	v1.GET("/user/:id/groups", handlerTest1)
+
+	v1.GET("/orgs/:id", handlerTest1)
+	v1.DELETE("/orgs/:id", handlerTest1)
+
+	w := PerformRequest(r, http.MethodGet, "/base/v1/user/groups")
+	assert.Equal(t, http.StatusNotFound, w.Code)
+}
+
+func TestLateRouteRegistrationSkippedNodes(t *testing.T) {
+	router := New()
+	router.HandleMethodNotAllowed = true
+	router.GET("/a", func(c *Context) { c.Status(http.StatusOK) })
+
+	w := PerformRequest(router, http.MethodGet, "/a")
+	if w.Code != http.StatusOK {
+		t.Fatalf("warmup status = %d, want 200", w.Code)
+	}
+
+	h := func(c *Context) {}
+	router.GET("/x/y/z/w", h)
+	router.GET("/x/y/:id/w", h)
+	router.GET("/x/:id/z/w", h)
+	router.GET("/:id/y/z/w", h)
+
+	req := httptest.NewRequest(http.MethodPost, "/x/y/z/w/extra", nil)
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", w.Code)
+	}
+}
+
+// TestIssue4818_skippedNodesOverflow_Panic reproduces the panic from issue #4818:
+// with HandleMethodNotAllowed enabled, getValue is called once per method tree
+// reusing the same c.skippedNodes stack without resetting it, so residue
+// accumulates until the reslice exceeds the capacity (engine.maxSections).
+// The request must not panic and must fall through to the normal 404 path
+// (the path genuinely matches no route, so 405 is not applicable here).
+func TestIssue4818_skippedNodesOverflow_Panic(t *testing.T) {
+	router := New()
+	router.HandleMethodNotAllowed = true
+
+	h := func(c *Context) {}
+	router.OPTIONS("/:p0/:p1/a/:p2", h)
+	router.GET("/:p0/:p1/a/:p2", h)
+	router.PATCH("/b/:p0/:p1/c", h)
+	router.DELETE("/b/:p0/:p1/d/:p3", h)
+	router.GET("/b/:p0/:p1/e/f", h)
+	router.POST("/b/:p0/:p1/g/:p4/h", h)
+	router.OPTIONS("/b/:p0/:p1/g/:p4/h", h)
+	router.DELETE("/b/cache", h)
+	router.GET("/b/clients/:p1/g", h)
+	router.POST("/b/clients/:p1/g", h)
+	router.PATCH("/b/clients/:p1/g/:p4", h)
+	router.OPTIONS("/b/clients/:p1/g/:p4", h)
+
+	req := httptest.NewRequest(http.MethodPost, "/b/clients/42", nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	// Must not panic; path matches no route, so 404 is the correct outcome.
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d (a panic would have aborted the test)", w.Code)
+	}
+}
+
+// TestIssue4818_MethodNotAllowedStillWorks verifies the HandleMethodNotAllowed
+// loop still produces a correct 405 with an Allow header after the fix, i.e.
+// the reset does not break the loop across multiple method trees.
+func TestIssue4818_MethodNotAllowedStillWorks(t *testing.T) {
+	router := New()
+	router.HandleMethodNotAllowed = true
+
+	h := func(c *Context) {}
+	router.OPTIONS("/:p0/:p1/a/:p2", h)
+	router.GET("/:p0/:p1/a/:p2", h)
+	router.PATCH("/b/:p0/:p1/c", h)
+	router.DELETE("/b/:p0/:p1/d/:p3", h)
+	router.GET("/b/:p0/:p1/e/f", h)
+	router.POST("/b/:p0/:p1/g/:p4/h", h)
+	router.OPTIONS("/b/:p0/:p1/g/:p4/h", h)
+	router.DELETE("/b/cache", h)
+	router.GET("/b/clients/:p1/g", h)
+	router.POST("/b/clients/:p1/g", h)
+	router.PATCH("/b/clients/:p1/g/:p4", h)
+	router.OPTIONS("/b/clients/:p1/g/:p4", h)
+
+	// PATCH /b/clients/42/g is registered under GET but not under PATCH
+	// -> HandleMethodNotAllowed should yield 405 with an Allow header.
+	req := httptest.NewRequest(http.MethodPatch, "/b/clients/42/g", nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405, got %d", w.Code)
+	}
+	allow := w.Header().Get("Allow")
+	if allow == "" {
+		t.Fatal("expected Allow header to be set for 405")
+	}
+}
+
+// TestIssue4818_MethodNotAllowedManyTrees stresses the loop across many
+// method trees to make sure the skipped-nodes accumulator can never overflow.
+func TestIssue4818_MethodNotAllowedManyTrees(t *testing.T) {
+	router := New()
+	router.HandleMethodNotAllowed = true
+
+	h := func(c *Context) {}
+	for _, m := range []string{
+		http.MethodGet, http.MethodPost, http.MethodPut, http.MethodDelete,
+		http.MethodPatch, http.MethodOptions, http.MethodHead, http.MethodConnect,
+		http.MethodTrace,
+	} {
+		router.Handle(m, "/:p0/:p1/a/:p2", h)
+		router.Handle(m, "/s/:p0/:p1/:p2/:p3/:p4/:p5/d", h)
+	}
+	// GET route so that a POST to a GET-only path yields 405
+	router.GET("/only-get", h)
+
+	req := httptest.NewRequest(http.MethodPost, "/only-get", nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405, got %d", w.Code)
+	}
 }

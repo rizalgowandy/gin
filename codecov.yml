@@ -1,5 +1,14 @@
+codecov:
+  require_ci_to_pass: true
+
 coverage:
-  notify:
-    gitter:
+  status:
+    project:
       default:
-        url: https://webhooks.gitter.im/e/d90dcdeeab2f1e357165
+        target: 99%
+        threshold: 99%
+
+    patch:
+      default:
+        target: 99%
+        threshold: 95%

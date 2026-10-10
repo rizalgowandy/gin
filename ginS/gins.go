@@ -1,4 +1,4 @@
-// Copyright 2014 Manu Martinez-Almeida.  All rights reserved.
+// Copyright 2014 Manu Martinez-Almeida. All rights reserved.
 // Use of this source code is governed by a MIT style
 // license that can be found in the LICENSE file.
 
@@ -12,15 +12,9 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-var once sync.Once
-var internalEngine *gin.Engine
-
-func engine() *gin.Engine {
-	once.Do(func() {
-		internalEngine = gin.Default()
-	})
-	return internalEngine
-}
+var engine = sync.OnceValue(func() *gin.Engine {
+	return gin.Default()
+})
 
 // LoadHTMLGlob is a wrapper for Engine.LoadHTMLGlob.
 func LoadHTMLGlob(pattern string) {
@@ -32,12 +26,17 @@ func LoadHTMLFiles(files ...string) {
 	engine().LoadHTMLFiles(files...)
 }
 
+// LoadHTMLFS is a wrapper for Engine.LoadHTMLFS.
+func LoadHTMLFS(fs http.FileSystem, patterns ...string) {
+	engine().LoadHTMLFS(fs, patterns...)
+}
+
 // SetHTMLTemplate is a wrapper for Engine.SetHTMLTemplate.
 func SetHTMLTemplate(templ *template.Template) {
 	engine().SetHTMLTemplate(templ)
 }
 
-// NoRoute adds handlers for NoRoute. It return a 404 code by default.
+// NoRoute adds handlers for NoRoute. It returns a 404 code by default.
 func NoRoute(handlers ...gin.HandlerFunc) {
 	engine().NoRoute(handlers...)
 }
@@ -66,6 +65,11 @@ func POST(relativePath string, handlers ...gin.HandlerFunc) gin.IRoutes {
 // GET is a shortcut for router.Handle("GET", path, handle)
 func GET(relativePath string, handlers ...gin.HandlerFunc) gin.IRoutes {
 	return engine().GET(relativePath, handlers...)
+}
+
+// QUERY is a shortcut for router.Handle("QUERY", path, handle)
+func QUERY(relativePath string, handlers ...gin.HandlerFunc) gin.IRoutes {
+	return engine().QUERY(relativePath, handlers...)
 }
 
 // DELETE is a shortcut for router.Handle("DELETE", path, handle)
@@ -108,7 +112,8 @@ func StaticFile(relativePath, filepath string) gin.IRoutes {
 // of the Router's NotFound handler.
 // To use the operating system's file system implementation,
 // use :
-//     router.Static("/static", "/var/www")
+//
+//	router.Static("/static", "/var/www")
 func Static(relativePath, root string) gin.IRoutes {
 	return engine().Static(relativePath, root)
 }
@@ -118,7 +123,7 @@ func StaticFS(relativePath string, fs http.FileSystem) gin.IRoutes {
 	return engine().StaticFS(relativePath, fs)
 }
 
-// Use attaches a global middleware to the router. ie. the middlewares attached though Use() will be
+// Use attaches a global middleware to the router. i.e. the middlewares attached through Use() will be
 // included in the handlers chain for every single request. Even 404, 405, static files...
 // For example, this is the right place for a logger or error management middleware.
 func Use(middlewares ...gin.HandlerFunc) gin.IRoutes {
@@ -145,7 +150,7 @@ func RunTLS(addr, certFile, keyFile string) (err error) {
 }
 
 // RunUnix attaches to a http.Server and starts listening and serving HTTP requests
-// through the specified unix socket (ie. a file)
+// through the specified unix socket (i.e. a file)
 // Note: this method will block the calling goroutine indefinitely unless an error happens.
 func RunUnix(file string) (err error) {
 	return engine().RunUnix(file)
@@ -153,7 +158,7 @@ func RunUnix(file string) (err error) {
 
 // RunFd attaches the router to a http.Server and starts listening and serving HTTP requests
 // through the specified file descriptor.
-// Note: the method will block the calling goroutine indefinitely unless on error happens.
+// Note: the method will block the calling goroutine indefinitely unless an error happens.
 func RunFd(fd int) (err error) {
 	return engine().RunFd(fd)
 }

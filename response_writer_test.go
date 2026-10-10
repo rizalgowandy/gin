@@ -1,31 +1,65 @@
-// Copyright 2014 Manu Martinez-Almeida.  All rights reserved.
+// Copyright 2014 Manu Martinez-Almeida. All rights reserved.
 // Use of this source code is governed by a MIT style
 // license that can be found in the LICENSE file.
 
 package gin
 
 import (
+	"bufio"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
-// TODO
-// func (w *responseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
-// func (w *responseWriter) CloseNotify() <-chan bool {
-// func (w *responseWriter) Flush() {
+// TestResponseWriterFlushWithFlusher verifies Flush() calls the underlying Flusher.
+func TestResponseWriterFlushWithFlusher(t *testing.T) {
+	testWriter := httptest.NewRecorder()
+	writer := &responseWriter{ResponseWriter: testWriter}
+	writer.Flush()
+	assert.True(t, testWriter.Flushed)
+}
 
-var _ ResponseWriter = &responseWriter{}
-var _ http.ResponseWriter = &responseWriter{}
-var _ http.ResponseWriter = ResponseWriter(&responseWriter{})
-var _ http.Hijacker = ResponseWriter(&responseWriter{})
-var _ http.Flusher = ResponseWriter(&responseWriter{})
-var _ http.CloseNotifier = ResponseWriter(&responseWriter{})
+// TestResponseWriterFlushWithNonFlusher verifies Flush() is a no-op
+// when the underlying ResponseWriter does not implement http.Flusher.
+// Guards against the panic reported in https://github.com/gin-gonic/gin/issues/4460
+func TestResponseWriterFlushWithNonFlusher(t *testing.T) {
+	nonFlusher := &nonFlusherWriter{header: http.Header{}}
+	writer := &responseWriter{ResponseWriter: nonFlusher}
+	require.NotPanics(t, func() {
+		writer.Flush()
+	})
+}
+
+// nonFlusherWriter is a minimal http.ResponseWriter that does NOT implement http.Flusher.
+type nonFlusherWriter struct {
+	header http.Header
+}
+
+func (w *nonFlusherWriter) Header() http.Header         { return w.header }
+func (w *nonFlusherWriter) Write(b []byte) (int, error) { return len(b), nil }
+func (w *nonFlusherWriter) WriteHeader(code int)        {}
+
+var (
+	_ ResponseWriter      = &responseWriter{}
+	_ http.ResponseWriter = &responseWriter{}
+	_ http.ResponseWriter = ResponseWriter(&responseWriter{})
+	_ http.Hijacker       = ResponseWriter(&responseWriter{})
+	_ http.Flusher        = ResponseWriter(&responseWriter{})
+	_ http.CloseNotifier  = ResponseWriter(&responseWriter{})
+)
 
 func init() {
 	SetMode(TestMode)
+}
+
+func TestResponseWriterUnwrap(t *testing.T) {
+	testWriter := httptest.NewRecorder()
+	writer := &responseWriter{ResponseWriter: testWriter}
+	assert.Same(t, testWriter, writer.Unwrap())
 }
 
 func TestResponseWriterReset(t *testing.T) {
@@ -87,13 +121,13 @@ func TestResponseWriterWrite(t *testing.T) {
 	assert.Equal(t, http.StatusOK, w.Status())
 	assert.Equal(t, http.StatusOK, testWriter.Code)
 	assert.Equal(t, "hola", testWriter.Body.String())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	n, err = w.Write([]byte(" adios"))
 	assert.Equal(t, 6, n)
 	assert.Equal(t, 10, w.Size())
 	assert.Equal(t, "hola adios", testWriter.Body.String())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 }
 
 func TestResponseWriterHijack(t *testing.T) {
@@ -102,17 +136,147 @@ func TestResponseWriterHijack(t *testing.T) {
 	writer.reset(testWriter)
 	w := ResponseWriter(writer)
 
-	assert.Panics(t, func() {
-		_, _, err := w.Hijack()
-		assert.NoError(t, err)
-	})
-	assert.True(t, w.Written())
+	// httptest.ResponseRecorder doesn't implement http.Hijacker; return
+	// http.ErrNotSupported instead of panicking (#4638). On unsupported the
+	// writer state stays untouched so the handler can still emit a normal
+	// HTTP response as a fallback.
+	conn, buf, err := w.Hijack()
+	assert.Nil(t, conn)
+	assert.Nil(t, buf)
+	require.ErrorIs(t, err, http.ErrNotSupported)
+	assert.False(t, w.Written())
 
-	assert.Panics(t, func() {
-		w.CloseNotify()
-	})
+	// CloseNotify on a non-CloseNotifier returns nil instead of panicking.
+	assert.Nil(t, w.CloseNotify())
 
 	w.Flush()
+}
+
+type mockHijacker struct {
+	*httptest.ResponseRecorder
+	hijacked bool
+}
+
+// Hijack implements the http.Hijacker interface. It just records that it was called.
+func (m *mockHijacker) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	m.hijacked = true
+	return nil, nil, nil
+}
+
+func TestResponseWriterHijackAfterWrite(t *testing.T) {
+	tests := []struct {
+		name                      string
+		action                    func(w ResponseWriter) error // Action to perform before hijacking
+		expectWrittenBeforeHijack bool
+		expectHijackSuccess       bool
+		expectWrittenAfterHijack  bool
+		expectError               error
+	}{
+		{
+			name:                      "hijack before write should succeed",
+			action:                    func(w ResponseWriter) error { return nil },
+			expectWrittenBeforeHijack: false,
+			expectHijackSuccess:       true,
+			expectWrittenAfterHijack:  true, // Hijack itself marks the writer as written
+			expectError:               nil,
+		},
+		{
+			name: "hijack after write should fail",
+			action: func(w ResponseWriter) error {
+				_, err := w.Write([]byte("test"))
+				return err
+			},
+			expectWrittenBeforeHijack: true,
+			expectHijackSuccess:       false,
+			expectWrittenAfterHijack:  true,
+			expectError:               errHijackAlreadyWritten,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			hijacker := &mockHijacker{ResponseRecorder: httptest.NewRecorder()}
+			writer := &responseWriter{}
+			writer.reset(hijacker)
+			w := ResponseWriter(writer)
+
+			// Check initial state
+			assert.False(t, w.Written(), "should not be written initially")
+
+			// Perform pre-hijack action
+			require.NoError(t, tc.action(w), "unexpected error during pre-hijack action")
+
+			// Check state before hijacking
+			assert.Equal(t, tc.expectWrittenBeforeHijack, w.Written(), "unexpected w.Written() state before hijack")
+
+			// Attempt to hijack
+			_, _, hijackErr := w.Hijack()
+
+			// Check results
+			require.ErrorIs(t, hijackErr, tc.expectError, "unexpected error from Hijack()")
+			assert.Equal(t, tc.expectHijackSuccess, hijacker.hijacked, "unexpected hijacker.hijacked state")
+			assert.Equal(t, tc.expectWrittenAfterHijack, w.Written(), "unexpected w.Written() state after hijack")
+		})
+	}
+}
+
+// TestResponseWriterHijackAfterWriteHeaderNow verifies that hijacking is allowed after
+// WriteHeaderNow but blocked after body data is written.
+func TestResponseWriterHijackAfterWriteHeaderNow(t *testing.T) {
+	tests := []struct {
+		name                      string
+		action                    func(w ResponseWriter) error
+		expectWrittenBeforeHijack bool
+		expectHijackSuccess       bool
+		expectWrittenAfterHijack  bool
+		expectError               error
+	}{
+		{
+			name: "hijack after WriteHeaderNow only should succeed (websocket pattern)",
+			action: func(w ResponseWriter) error {
+				w.WriteHeaderNow() // Simulate websocket.Accept() behavior
+				return nil
+			},
+			expectWrittenBeforeHijack: true,
+			expectHijackSuccess:       true, // NEW BEHAVIOR: allow hijack after just header write
+			expectWrittenAfterHijack:  true,
+			expectError:               nil,
+		},
+		{
+			name: "hijack after WriteHeaderNow + Write should fail",
+			action: func(w ResponseWriter) error {
+				w.WriteHeaderNow()
+				_, err := w.Write([]byte("test"))
+				return err
+			},
+			expectWrittenBeforeHijack: true,
+			expectHijackSuccess:       false,
+			expectWrittenAfterHijack:  true,
+			expectError:               errHijackAlreadyWritten,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			hijacker := &mockHijacker{ResponseRecorder: httptest.NewRecorder()}
+			writer := &responseWriter{}
+			writer.reset(hijacker)
+			w := ResponseWriter(writer)
+
+			require.NoError(t, tc.action(w), "unexpected error during pre-hijack action")
+
+			assert.Equal(t, tc.expectWrittenBeforeHijack, w.Written(), "unexpected w.Written() state before hijack")
+
+			_, _, hijackErr := w.Hijack()
+
+			if tc.expectError == nil {
+				require.NoError(t, hijackErr, "expected hijack to succeed")
+			} else {
+				require.ErrorIs(t, hijackErr, tc.expectError, "unexpected error from Hijack()")
+			}
+			assert.Equal(t, tc.expectHijackSuccess, hijacker.hijacked, "unexpected hijacker.hijacked state")
+			assert.Equal(t, tc.expectWrittenAfterHijack, w.Written(), "unexpected w.Written() state after hijack")
+		})
+	}
 }
 
 func TestResponseWriterFlush(t *testing.T) {
@@ -127,6 +291,54 @@ func TestResponseWriterFlush(t *testing.T) {
 
 	// should return 500
 	resp, err := http.Get(testServer.URL)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	assert.Equal(t, http.StatusInternalServerError, resp.StatusCode)
+}
+
+func TestResponseWriterStatusCode(t *testing.T) {
+	testWriter := httptest.NewRecorder()
+	writer := &responseWriter{}
+	writer.reset(testWriter)
+	w := ResponseWriter(writer)
+
+	w.WriteHeader(http.StatusOK)
+	w.WriteHeaderNow()
+
+	assert.Equal(t, http.StatusOK, w.Status())
+	assert.True(t, w.Written())
+
+	w.WriteHeader(http.StatusUnauthorized)
+
+	// status must be 200 although we tried to change it
+	assert.Equal(t, http.StatusOK, w.Status())
+}
+
+// mockPusherResponseWriter is an http.ResponseWriter that implements http.Pusher.
+type mockPusherResponseWriter struct {
+	http.ResponseWriter
+}
+
+func (m *mockPusherResponseWriter) Push(target string, opts *http.PushOptions) error {
+	return nil
+}
+
+// nonPusherResponseWriter is an http.ResponseWriter that does not implement http.Pusher.
+type nonPusherResponseWriter struct {
+	http.ResponseWriter
+}
+
+func TestPusherWithPusher(t *testing.T) {
+	rw := &mockPusherResponseWriter{}
+	w := &responseWriter{ResponseWriter: rw}
+
+	pusher := w.Pusher()
+	assert.NotNil(t, pusher, "Expected pusher to be non-nil")
+}
+
+func TestPusherWithoutPusher(t *testing.T) {
+	rw := &nonPusherResponseWriter{}
+	w := &responseWriter{ResponseWriter: rw}
+
+	pusher := w.Pusher()
+	assert.Nil(t, pusher, "Expected pusher to be nil")
 }

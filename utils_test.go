@@ -1,4 +1,4 @@
-// Copyright 2014 Manu Martinez-Almeida.  All rights reserved.
+// Copyright 2014 Manu Martinez-Almeida. All rights reserved.
 // Use of this source code is governed by a MIT style
 // license that can be found in the LICENSE file.
 
@@ -8,10 +8,12 @@ import (
 	"bytes"
 	"encoding/xml"
 	"fmt"
+	"math"
 	"net/http"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func init() {
@@ -19,7 +21,7 @@ func init() {
 }
 
 func BenchmarkParseAccept(b *testing.B) {
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		parseAccept("text/html , application/xhtml+xml,application/xml;q=0.9,  */* ;q=0.8")
 	}
 }
@@ -29,7 +31,7 @@ type testStruct struct {
 }
 
 func (t *testStruct) ServeHTTP(w http.ResponseWriter, req *http.Request) {
-	assert.Equal(t.T, "POST", req.Method)
+	assert.Equal(t.T, http.MethodPost, req.Method)
 	assert.Equal(t.T, "/path", req.URL.Path)
 	w.WriteHeader(http.StatusInternalServerError)
 	fmt.Fprint(w, "hello")
@@ -39,17 +41,17 @@ func TestWrap(t *testing.T) {
 	router := New()
 	router.POST("/path", WrapH(&testStruct{t}))
 	router.GET("/path2", WrapF(func(w http.ResponseWriter, req *http.Request) {
-		assert.Equal(t, "GET", req.Method)
+		assert.Equal(t, http.MethodGet, req.Method)
 		assert.Equal(t, "/path2", req.URL.Path)
 		w.WriteHeader(http.StatusBadRequest)
 		fmt.Fprint(w, "hola!")
 	}))
 
-	w := performRequest(router, "POST", "/path")
+	w := PerformRequest(router, http.MethodPost, "/path")
 	assert.Equal(t, http.StatusInternalServerError, w.Code)
 	assert.Equal(t, "hello", w.Body.String())
 
-	w = performRequest(router, "GET", "/path2")
+	w = PerformRequest(router, http.MethodGet, "/path2")
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 	assert.Equal(t, "hola!", w.Body.String())
 }
@@ -94,7 +96,7 @@ func somefunction() {
 }
 
 func TestJoinPaths(t *testing.T) {
-	assert.Equal(t, "", joinPaths("", ""))
+	assert.Empty(t, joinPaths("", ""))
 	assert.Equal(t, "/", joinPaths("", "/"))
 	assert.Equal(t, "/a", joinPaths("/a", ""))
 	assert.Equal(t, "/a/", joinPaths("/a/", ""))
@@ -119,13 +121,13 @@ func TestBindMiddleware(t *testing.T) {
 		called = true
 		value = c.MustGet(BindKey).(*bindTestStruct)
 	})
-	performRequest(router, "GET", "/?foo=hola&bar=10")
+	PerformRequest(router, http.MethodGet, "/?foo=hola&bar=10")
 	assert.True(t, called)
 	assert.Equal(t, "hola", value.Foo)
 	assert.Equal(t, 10, value.Bar)
 
 	called = false
-	performRequest(router, "GET", "/?foo=hola&bar=1")
+	PerformRequest(router, http.MethodGet, "/?foo=hola&bar=1")
 	assert.False(t, called)
 
 	assert.Panics(t, func() {
@@ -142,4 +144,30 @@ func TestMarshalXMLforH(t *testing.T) {
 	var x xml.StartElement
 	e := h.MarshalXML(enc, x)
 	assert.Error(t, e)
+}
+
+func TestMarshalXMLforHSuccess(t *testing.T) {
+	h := H{
+		"key1": "value1",
+		"key2": 123,
+	}
+	data, err := xml.Marshal(h)
+	require.NoError(t, err)
+	assert.Contains(t, string(data), "<key1>value1</key1>")
+	assert.Contains(t, string(data), "<key2>123</key2>")
+}
+
+func TestIsASCII(t *testing.T) {
+	assert.True(t, isASCII("test"))
+	assert.False(t, isASCII("🧡💛💚💙💜"))
+}
+
+func TestSafeInt8(t *testing.T) {
+	assert.Equal(t, int8(100), safeInt8(100))
+	assert.Equal(t, int8(math.MaxInt8), safeInt8(int(math.MaxInt8)+123))
+}
+
+func TestSafeUint16(t *testing.T) {
+	assert.Equal(t, uint16(100), safeUint16(100))
+	assert.Equal(t, uint16(math.MaxUint16), safeUint16(int(math.MaxUint16)+123))
 }

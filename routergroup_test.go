@@ -1,4 +1,4 @@
-// Copyright 2014 Manu Martinez-Almeida.  All rights reserved.
+// Copyright 2014 Manu Martinez-Almeida. All rights reserved.
 // Use of this source code is governed by a MIT style
 // license that can be found in the LICENSE file.
 
@@ -10,6 +10,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 )
+
+var MaxHandlers = 32
 
 func init() {
 	SetMode(TestMode)
@@ -40,6 +42,7 @@ func TestRouterGroupBasicHandle(t *testing.T) {
 	performRequestInGroup(t, http.MethodDelete)
 	performRequestInGroup(t, http.MethodHead)
 	performRequestInGroup(t, http.MethodOptions)
+	performRequestInGroup(t, MethodQuery)
 }
 
 func performRequestInGroup(t *testing.T, method string) {
@@ -76,15 +79,18 @@ func performRequestInGroup(t *testing.T, method string) {
 	case http.MethodOptions:
 		v1.OPTIONS("/test", handler)
 		login.OPTIONS("/test", handler)
+	case MethodQuery:
+		v1.QUERY("/test", handler)
+		login.QUERY("/test", handler)
 	default:
 		panic("unknown method")
 	}
 
-	w := performRequest(router, method, "/v1/login/test")
+	w := PerformRequest(router, method, "/v1/login/test")
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 	assert.Equal(t, "the method was "+method+" and index 3", w.Body.String())
 
-	w = performRequest(router, method, "/v1/test")
+	w = PerformRequest(router, method, "/v1/test")
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 	assert.Equal(t, "the method was "+method+" and index 1", w.Body.String())
 }
@@ -111,16 +117,31 @@ func TestRouterGroupInvalidStaticFile(t *testing.T) {
 	})
 }
 
-func TestRouterGroupTooManyHandlers(t *testing.T) {
+func TestRouterGroupInvalidStaticFileFS(t *testing.T) {
 	router := New()
-	handlers1 := make([]HandlerFunc, 40)
+	assert.Panics(t, func() {
+		router.StaticFileFS("/path/:param", "favicon.ico", Dir(".", false))
+	})
+
+	assert.Panics(t, func() {
+		router.StaticFileFS("/path/*param", "favicon.ico", Dir(".", false))
+	})
+}
+
+func TestRouterGroupTooManyHandlers(t *testing.T) {
+	const (
+		panicValue = "too many handlers"
+		maximumCnt = abortIndex
+	)
+	router := New()
+	handlers1 := make([]HandlerFunc, maximumCnt-1)
 	router.Use(handlers1...)
 
-	handlers2 := make([]HandlerFunc, 26)
-	assert.Panics(t, func() {
+	handlers2 := make([]HandlerFunc, maximumCnt+1)
+	assert.PanicsWithValue(t, panicValue, func() {
 		router.Use(handlers2...)
 	})
-	assert.Panics(t, func() {
+	assert.PanicsWithValue(t, panicValue, func() {
 		router.GET("/", handlers2...)
 	})
 }
@@ -171,8 +192,54 @@ func testRoutesInterface(t *testing.T, r IRoutes) {
 	assert.Equal(t, r, r.PUT("/", handler))
 	assert.Equal(t, r, r.OPTIONS("/", handler))
 	assert.Equal(t, r, r.HEAD("/", handler))
+	assert.Equal(t, r, r.Match([]string{http.MethodPut, http.MethodPatch}, "/match", handler))
 
 	assert.Equal(t, r, r.StaticFile("/file", "."))
+	assert.Equal(t, r, r.StaticFileFS("/static2", ".", Dir(".", false)))
 	assert.Equal(t, r, r.Static("/static", "."))
 	assert.Equal(t, r, r.StaticFS("/static2", Dir(".", false)))
+}
+
+func TestRouterGroupCombineHandlersTooManyHandlers(t *testing.T) {
+	group := &RouterGroup{
+		Handlers: make(HandlersChain, MaxHandlers), // Assume group already has MaxHandlers middleware
+	}
+	tooManyHandlers := make(HandlersChain, MaxHandlers) // Add MaxHandlers more, total 2 * MaxHandlers
+
+	// This should trigger panic
+	assert.Panics(t, func() {
+		group.combineHandlers(tooManyHandlers)
+	}, "should panic due to too many handlers")
+}
+
+func TestRouterGroupCombineHandlersEmptySliceNotNil(t *testing.T) {
+	group := &RouterGroup{
+		Handlers: HandlersChain{},
+	}
+
+	result := group.combineHandlers(HandlersChain{})
+	assert.NotNil(t, result, "result should not be nil even with empty handlers")
+	assert.Empty(t, result, "empty handlers should return empty chain")
+}
+
+func TestRouterGroupAny(t *testing.T) {
+	router := New()
+	router.Any("/any", func(c *Context) {
+		c.String(http.StatusOK, c.Request.Method)
+	})
+
+	v1 := router.Group("/v1")
+	v1.Any("/any", func(c *Context) {
+		c.String(http.StatusOK, "v1:"+c.Request.Method)
+	})
+
+	for _, method := range anyMethods {
+		w := PerformRequest(router, method, "/any")
+		assert.Equal(t, http.StatusOK, w.Code)
+		assert.Equal(t, method, w.Body.String())
+
+		w = PerformRequest(router, method, "/v1/any")
+		assert.Equal(t, http.StatusOK, w.Code)
+		assert.Equal(t, "v1:"+method, w.Body.String())
+	}
 }

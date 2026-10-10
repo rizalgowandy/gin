@@ -1,4 +1,4 @@
-// Copyright 2014 Manu Martinez-Almeida.  All rights reserved.
+// Copyright 2014 Manu Martinez-Almeida. All rights reserved.
 // Use of this source code is governed by a MIT style
 // license that can be found in the LICENSE file.
 
@@ -9,8 +9,9 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/gin-gonic/gin/internal/json"
+	"github.com/gin-gonic/gin/codec/json"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestError(t *testing.T) {
@@ -32,10 +33,10 @@ func TestError(t *testing.T) {
 		"meta":  "some data",
 	}, err.JSON())
 
-	jsonBytes, _ := json.Marshal(err)
-	assert.Equal(t, "{\"error\":\"test error\",\"meta\":\"some data\"}", string(jsonBytes))
+	jsonBytes, _ := json.API.Marshal(err)
+	assert.JSONEq(t, "{\"error\":\"test error\",\"meta\":\"some data\"}", string(jsonBytes))
 
-	err.SetMeta(H{ // nolint: errcheck
+	err.SetMeta(H{ //nolint: errcheck
 		"status": "200",
 		"data":   "some data",
 	})
@@ -45,7 +46,7 @@ func TestError(t *testing.T) {
 		"data":   "some data",
 	}, err.JSON())
 
-	err.SetMeta(H{ // nolint: errcheck
+	err.SetMeta(H{ //nolint: errcheck
 		"error":  "custom error",
 		"status": "200",
 		"data":   "some data",
@@ -60,7 +61,7 @@ func TestError(t *testing.T) {
 		status string
 		data   string
 	}
-	err.SetMeta(customError{status: "200", data: "other data"}) // nolint: errcheck
+	err.SetMeta(customError{status: "200", data: "other data"}) //nolint: errcheck
 	assert.Equal(t, customError{status: "200", data: "other data"}, err.JSON())
 }
 
@@ -86,19 +87,19 @@ Error #02: second
 Error #03: third
      Meta: map[status:400]
 `, errs.String())
-	assert.Equal(t, []interface{}{
+	assert.Equal(t, []any{
 		H{"error": "first"},
 		H{"error": "second", "meta": "some data"},
 		H{"error": "third", "status": "400"},
 	}, errs.JSON())
-	jsonBytes, _ := json.Marshal(errs)
-	assert.Equal(t, "[{\"error\":\"first\"},{\"error\":\"second\",\"meta\":\"some data\"},{\"error\":\"third\",\"status\":\"400\"}]", string(jsonBytes))
+	jsonBytes, _ := json.API.Marshal(errs)
+	assert.JSONEq(t, "[{\"error\":\"first\"},{\"error\":\"second\",\"meta\":\"some data\"},{\"error\":\"third\",\"status\":\"400\"}]", string(jsonBytes))
 	errs = errorMsgs{
 		{Err: errors.New("first"), Type: ErrorTypePrivate},
 	}
 	assert.Equal(t, H{"error": "first"}, errs.JSON())
-	jsonBytes, _ = json.Marshal(errs)
-	assert.Equal(t, "{\"error\":\"first\"}", string(jsonBytes))
+	jsonBytes, _ = json.API.Marshal(errs)
+	assert.JSONEq(t, "{\"error\":\"first\"}", string(jsonBytes))
 
 	errs = errorMsgs{}
 	assert.Nil(t, errs.Last())
@@ -113,7 +114,7 @@ func (e TestErr) Error() string { return string(e) }
 // TestErrorUnwrap tests the behavior of gin.Error with "errors.Is()" and "errors.As()".
 // "errors.Is()" and "errors.As()" have been added to the standard library in go 1.13.
 func TestErrorUnwrap(t *testing.T) {
-	innerErr := TestErr("somme error")
+	innerErr := TestErr("some error")
 
 	// 2 layers of wrapping : use 'fmt.Errorf("%w")' to wrap a gin.Error{}, which itself wraps innerErr
 	err := fmt.Errorf("wrapped: %w", &Error{
@@ -122,7 +123,18 @@ func TestErrorUnwrap(t *testing.T) {
 	})
 
 	// check that 'errors.Is()' and 'errors.As()' behave as expected :
-	assert.True(t, errors.Is(err, innerErr))
+	require.ErrorIs(t, err, innerErr)
 	var testErr TestErr
-	assert.True(t, errors.As(err, &testErr))
+	require.ErrorAs(t, err, &testErr)
+
+	// Test non-pointer usage of gin.Error
+	errNonPointer := Error{
+		Err:  innerErr,
+		Type: ErrorTypeAny,
+	}
+	wrappedErr := fmt.Errorf("wrapped: %w", errNonPointer)
+	// Check that 'errors.Is()' and 'errors.As()' behave as expected for non-pointer usage
+	require.ErrorIs(t, wrappedErr, innerErr)
+	var testErrNonPointer TestErr
+	require.ErrorAs(t, wrappedErr, &testErrNonPointer)
 }
